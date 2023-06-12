@@ -105,7 +105,7 @@
       <button :disabled="hasBalanceWarning" class="cta-button" @click="sendOtp">Confirm</button>
     </div>
   </form>
-  <form v-if="step === 'validate_otp'" class="form-send" @submit.prevent="onSubmit">
+  <form v-if="step === 'validate_otp'" class="form-send" @submit.prevent="signAndSendTx">
     <div style="display: block;">
       <img src="@/assets/svg/password.svg" style="width: 50px; height: 50px; margin: 1rem 0;" alt="send icon" />
       <h2 class="people-title">Enter Verification Code</h2>
@@ -230,6 +230,20 @@ const transaction = ref<TokenTransaction>({
   estimatedGas: "0",
 });
 
+const userOp = ref<UserOperationStruct>({
+  sender: "0x",
+  nonce: 0,
+  initCode: "0x",
+  callData: '0x',
+  callGasLimit: 0,
+  verificationGasLimit: 0,
+  preVerificationGas: 0,
+  maxFeePerGas: 0,
+  maxPriorityFeePerGas: 0,
+  paymasterAndData: [],
+  signature: [],
+});
+
 const isNumber = (event: Event) => {
   (event.currentTarget as HTMLInputElement).value = "";
   const keyPressed: string = (event as KeyboardEvent).key;
@@ -289,15 +303,6 @@ const countDownTimer = () => {
       countDown.value--;
     }
   }, 1000);
-}
-
-const resendOtp = async () => {
-  countDownTimer();
-  const result: any = await genAndSendOtp();
-  if (result === 429) {
-    console.error("Too many requests to send otp.");
-    createNotification("Too many requests to send otp.", "error");
-  }
 }
 
 const token = computed(() => tokenStore.token(transaction.value.token));
@@ -442,11 +447,10 @@ const buildCallData = (tx: TokenTransaction,) => {
   }
 }
 
-const buildTokenTransferUserOp = async (
+const setTokenTransferUserOp = async (
   tx: TokenTransaction,
-  otp: string,
   api: HexlinkAccountAPI,
-) : Promise<UserOperationStruct> => {
+) => {
   const sender = await getAccountAddress();
   let nonce : EthBigNumber = EthBigNumber.from(0);
   let initCode : [] | string = [];
@@ -458,7 +462,7 @@ const buildTokenTransferUserOp = async (
     preVerificationGas += 200000;
   }
   const gasInfo = await api.provider.getFeeData();
-  const userOp : UserOperationStruct = {
+  userOp.value = {
       sender,
       nonce,
       initCode,
@@ -471,54 +475,40 @@ const buildTokenTransferUserOp = async (
       paymasterAndData: [],
       signature: [],
   };
-  const userOpHash = await genUserOpHash(userOp, api);
-  message.value = "Signing your transaction...";
-  const result: any = await genSignature(otp, userOpHash);
-  if (result.code === 200) {
-    return {
-      ...userOp,
-      signature: (result as any).signature,
-    };
-  } else if (result.code === 429) {
-    throw new Error("Too many attempts. Please wait for five minutes");
-  } else {
-    console.log(result);
-    throw new Error("Failed to sign the user opeeration");
-  }
 };
 
-const onSubmit = async (_e: Event) => {
+const getApi = () => {
+  return new HexlinkAccountAPI({
+    provider: useChainStore().provider,
+    entryPointAddress: config.entryPoint,
+    factoryAddress: config.accountFactory,
+    paymasterAPI: undefined,
+    name: getNameHash()
+  });
+};
+
+const signAndSendTx = async (_e: Event) => {
   step.value = 'process_tx';
   try {
-    transaction.value.amount = tokenAmount(
-      transaction.value.amountInput,
-      token.value.decimals
-    );
     txStatus.value = "processing";
     message.value = "Preparing your transaction...";
-    const api = new HexlinkAccountAPI({
-      provider: useChainStore().provider,
-      entryPointAddress: config.entryPoint,
-      factoryAddress: config.accountFactory,
-      paymasterAPI: undefined,
-      name: getNameHash()
-    });
-    const op = await buildTokenTransferUserOp(
-      transaction.value, code.join(""), api
-    );
+    const api = getApi();
+    message.value = "Signing your transaction...";
+    const userOpHash = await genUserOpHash(userOp.value, api);
+    userOp.value!.signature = await genSignature(code.join(""), userOpHash);
     message.value = "Sending your transaction...";
-    console.log(`Signed UserOperation: ${await printOp(op)}`);
+    console.log(`Signed UserOperation: ${await printOp(userOp.value)}`);
 
-    const bundler = await getHttpRpcClient(
-      useChainStore().provider,
-      config.bundlerUrl,
-      config.entryPoint
-    );
-    const uoHash = await bundler.sendUserOpToBundler(op);
-    console.log(`transaction ${uoHash} sent...`);
-    message.value = "Waiting for confirmation...";
-    const txHash = await api.getUserOpReceipt(uoHash);
-    console.log(`Transaction hash: ${txHash}`);
+    // const bundler = await getHttpRpcClient(
+    //   useChainStore().provider,
+    //   config.bundlerUrl,
+    //   config.entryPoint
+    // );
+    // const uoHash = await bundler.sendUserOpToBundler(op);
+    // console.log(`transaction ${uoHash} sent...`);
+    // message.value = "Waiting for confirmation...";
+    // const txHash = await api.getUserOpReceipt(uoHash);
+    // console.log(`Transaction hash: ${txHash}`);
   
     message.value = "Done!";
     txStatus.value = "success";
@@ -575,8 +565,15 @@ const inputToken = async () => {
 
 const sendOtp = async () => {
   step.value = 'validate_otp';
+  transaction.value.amount = tokenAmount(
+    transaction.value.amountInput,
+    token.value.decimals
+  );
+  const api = getApi();
+  await setTokenTransferUserOp(transaction.value, api);
+  const userOpHash = await genUserOpHash(userOp.value, api);
   try {
-    const result: any = await genAndSendOtp();
+    const result: any = await genAndSendOtp(userOpHash);
     if (result === 429) {
       console.error("Too many requests to send otp.");
       createNotification("Too many requests to send otp.", "error");
@@ -586,6 +583,16 @@ const sendOtp = async () => {
   } catch (err) {
     console.log(err);
     createNotification(err as string, "error");
+  }
+}
+
+const resendOtp = async () => {
+  countDownTimer();
+  const userOpHash = await genUserOpHash(userOp.value, getApi());
+  const result: any = await genAndSendOtp(userOpHash);
+  if (result === 429) {
+    console.error("Too many requests to send otp.");
+    createNotification("Too many requests to send otp.", "error");
   }
 }
 

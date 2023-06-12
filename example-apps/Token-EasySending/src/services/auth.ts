@@ -19,32 +19,48 @@ import { normalizeEmail, createNotification } from "@/web3/utils";
 
 import type { Token } from "../../../../functions/common";
 import type { PhoneData } from "../types";
+import DAuth from "@dauth/core";
 
 const auth = getAuth(app)
 const functions = getFunctions()
 
-export async function genAndSendOtp() {
-    const user = useAuthStore().user!;
-    const genOtpCall = httpsCallable(functions, 'genAndSendOTP');
-    const result = await genOtpCall({
-        receiver: {schema: user.idType, value: user.handle}
-    });
-    return (result.data as any).code as number;
+const dauth = new DAuth({
+    baseURL: 'https://demo-api.dauth.network/dauth/sdk/v1.1/',
+    clientID: import.meta.env.DAUTH_CLIENT_ID || "demo",
+});
+
+function getDAuthIdType(idType: string) {
+    if (idType === 'mailto') {
+        return 'email';
+    } else if (idType === 'tel') {
+        return 'sms';
+    } else {
+        throw new Error("unsupported identity type");
+    }
 }
 
-export async function genSignature(otp: string, message: string) {
+export async function genAndSendOtp(requestId: string) {
     const user = useAuthStore().user!;
-    if (user.idType != "mailto" && user.idType != "tel") {
-        throw new Error("supported identity type");
-    }
-    const validateOTPCall = httpsCallable(functions, 'validateOtp');
-    const inputParam : any = {
-        receiver: {schema: user.idType, value: user.handle},
-        otp,
-        message
-    };
-    const result = await validateOTPCall(inputParam);
-    return result.data;
+    console.log(user.handle);
+    console.log(getDAuthIdType(user.idType));
+    console.log(requestId);
+    console.log("--------");
+    const result = await dauth.service.sendOtp({
+        account: user.handle,
+        account_type: getDAuthIdType(user.idType),
+        request_id: requestId
+    });
+    console.log("--------");
+    console.log(result);
+}
+
+export async function genSignature(otp: string, requestId: string) {
+    const res = await dauth.service.authOptConfirm({
+        code: otp,
+        request_id: requestId,
+        mode: 'proof'
+    });
+    return res.signature;
 }
 
 export async function notifyTransfer(
